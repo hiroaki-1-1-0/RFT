@@ -40,12 +40,12 @@ RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | sh && \
 # Disable usage stats by default for users who are sensitive to sharing usage.
 # Users are encouraged to enable if the wish.
 ENV RAY_USAGE_STATS_ENABLED=0
-ENV NEMO_RL_VENV_DIR=/opt/ray_venvs
+ENV NEMO_RL_VENV_DIR=/RFT/ray_venvs
 
 
 FROM base AS hermetic
 
-WORKDIR /opt/nemo-rl
+WORKDIR /RFT/nemo-rl
 
 # First copy only the dependency files
 COPY pyproject.toml uv.lock ./
@@ -56,7 +56,7 @@ COPY --link 3rdparty/ ./3rdparty/
 ARG MAX_JOBS=4
 ARG NVTE_BUILD_THREADS_PER_JOB=1
 
-ENV UV_PROJECT_ENVIRONMENT=/opt/nemo_rl_venv
+ENV UV_PROJECT_ENVIRONMENT=/RFT/nemo_rl_venv
 ENV UV_LINK_MODE=copy
 
 # Create and activate virtual environment
@@ -75,8 +75,8 @@ uv sync --link-mode symlink --locked --extra mcore --no-install-project
 uv sync --link-mode symlink --locked --all-groups --no-install-project
 EOF
 
-ENV PATH="/opt/nemo_rl_venv/bin:$PATH"
-ENV NEMO_RL_VENV_DIR=/opt/ray_venvs
+ENV PATH="/RFT/nemo_rl_venv/bin:$PATH"
+ENV NEMO_RL_VENV_DIR=/RFT/ray_venvs
 
 # Prefetch all virtual environments
 # Copy entire source to temp location, run prefetch, then clean up
@@ -86,7 +86,7 @@ RUN cd /tmp/nemo-rl-prefetch && \
     cd / && \
     rm -rf /tmp/nemo-rl-prefetch
 
-WORKDIR /opt/nemo-rl
+WORKDIR /RFT/nemo-rl
 
 FROM hermetic AS release
 
@@ -99,9 +99,9 @@ ENV NVIDIA_BUILD_REF=${NVIDIA_BUILD_REF:-<unknown>}
 LABEL com.nvidia.build.id="${NVIDIA_BUILD_ID}"
 LABEL com.nvidia.build.ref="${NVIDIA_BUILD_REF}"
 
-ENV NEMO_RL_VENV_DIR=/opt/ray_venvs
+ENV NEMO_RL_VENV_DIR=/RFT/ray_venvs
 
-COPY . /opt/nemo-rl
+COPY . /RFT/nemo-rl
 
 # Make hermetic the default target instead of release since that's the recommended container
 FROM hermetic
