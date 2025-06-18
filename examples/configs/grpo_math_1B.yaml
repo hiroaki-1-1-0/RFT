@@ -23,7 +23,7 @@ loss_fn:
 
 checkpointing:
   enabled: true
-  checkpoint_dir: "results/grpo"
+  checkpoint_dir: "results/grpo/test" # 新しい条件で実験を行う場合、ここを変更する。また、実験条件を/RFT/RFT/results/experiment_info.txtに記録する。
   metric_name: "val_reward"
   higher_is_better: true
   keep_top_k: 3
