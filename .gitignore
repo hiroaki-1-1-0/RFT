@@ -35,6 +35,7 @@ docker/*
 wandb/
 checkpoints/
 results/
+!results/experiment_info.txt
 code_snapshots/
 
 # Runtime env
