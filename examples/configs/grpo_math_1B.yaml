@@ -23,7 +23,7 @@ loss_fn:
 
 checkpointing:
   enabled: true
-  checkpoint_dir: "results/grpo/test" # 新しい条件で実験を行う場合、ここを変更する。また、実験条件を/RFT/RFT/results/experiment_info.txtに記録する。
+  checkpoint_dir: "results/grpo/acereason_math/4b" # 新しい条件で実験を行う場合、ここを変更する。また、実験条件を/RFT/RFT/results/experiment_info.txtに記録する。
   metric_name: "val_reward"
   higher_is_better: true
   keep_top_k: 3
@@ -31,7 +31,7 @@ checkpointing:
 
 policy:
   # Qwen/Qwen2.5-1.5B has tied weights which are only supported with dtensor policy with tp size 1 (https://github.com/NVIDIA/NeMo-RL/issues/227)
-  model_name: "Qwen/Qwen3-0.6B-Base"
+  model_name: "Qwen/Qwen3-4B-Base"
   tokenizer:
     name: ${policy.model_name} ## specify if you'd like to use a tokenizer different from the model's default
   train_global_batch_size: 448
@@ -111,7 +111,7 @@ data:
   max_input_seq_length: ${policy.max_total_sequence_length} # upper bound, real truncation occurs at vllm.max_model_len
   prompt_file: "examples/prompts/cot.txt"
   system_prompt_file: null
-  dataset_name: "OpenMathInstruct-2"
+  dataset_name: "AceReason-Math"
 
 env:
   math:

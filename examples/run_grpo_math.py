@@ -26,6 +26,7 @@ from nemo_rl.algorithms.grpo import MasterConfig, grpo_train, setup
 from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.data import DataConfig
 from nemo_rl.data.datasets import AllTaskProcessedDataset
+from nemo_rl.data.hf_datasets.acereason_math import AceReasonMathDataset
 from nemo_rl.data.hf_datasets.deepscaler import DeepScalerDataset
 from nemo_rl.data.hf_datasets.openmathinstruct2 import OpenMathInstruct2Dataset
 from nemo_rl.data.interfaces import (
@@ -201,7 +202,7 @@ def setup_data(
         system_prompt_file=data_config["system_prompt_file"],
     )
 
-    # Load OpenMathInstruct2Dataset using nemo rl datasets
+    # Load dataset using nemo rl datasets
     if data_config["dataset_name"] == "OpenMathInstruct-2":
         print("Loading nvidia/OpenMathInstruct2Dataset for training and validation")
         data: Any = OpenMathInstruct2Dataset()
@@ -210,6 +211,9 @@ def setup_data(
             "Loading agentica-org/DeepScaleR-Preview-Dataset for training and validation"
         )
         data: Any = DeepScalerDataset()
+    elif data_config["dataset_name"] == "AceReason-Math":
+        print("Loading nvidia/AceReason-Math for training and validation")
+        data: Any = AceReasonMathDataset()
     else:
         raise ValueError(f"No processor for dataset {data_config['dataset_name']}.")
 
