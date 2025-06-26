@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from nemo_rl.data.hf_datasets.acereason_math import AceReasonMathDataset
 from nemo_rl.data.hf_datasets.chat_templates import COMMON_CHAT_TEMPLATES
 from nemo_rl.data.hf_datasets.dpo import DPODataset
 from nemo_rl.data.hf_datasets.helpsteer3 import HelpSteer3Dataset
@@ -23,6 +24,7 @@ from nemo_rl.data.hf_datasets.prompt_response_dataset import (
 from nemo_rl.data.hf_datasets.squad import SquadDataset
 
 __all__ = [
+    "AceReasonMathDataset",
     "DPODataset",
     "HelpSteer3Dataset",
     "OasstDataset",
