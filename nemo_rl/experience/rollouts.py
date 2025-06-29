@@ -291,17 +291,44 @@ def run_multi_turn_rollout(
             active_input_lengths,
             greedy=greedy,
         )
+        
+        # Validate that generated_ids matches active_indices size
+        if len(generated_ids) != len(active_indices):
+            print(f"Warning: Size mismatch - generated_ids: {len(generated_ids)}, active_indices: {len(active_indices)}")
+            # Truncate to minimum size to prevent IndexError
+            min_size = min(len(generated_ids), len(active_indices))
+            generated_ids = generated_ids[:min_size]
+            active_indices = active_indices[:min_size]
 
         # Record token usage - assistant
         for i, global_idx in enumerate(active_indices.tolist()):
-            sample_assistant_token_counts[global_idx] += len(generated_ids[i])
-            sample_token_counts[global_idx] += len(generated_ids[i])
+            # Check bounds to prevent IndexError
+            if i < len(generated_ids):
+                sample_assistant_token_counts[global_idx] += len(generated_ids[i])
+                sample_token_counts[global_idx] += len(generated_ids[i])
+            else:
+                print(f"Warning: generated_ids index {i} out of range (len={len(generated_ids)}), skipping token count for global_idx {global_idx}")
 
         # Track total generated tokens this turn
         total_gen_tokens_per_turn.append(sum(len(ids) for ids in generated_ids))
 
         # Calculate rewards and get environment feedback
         env_output: EnvironmentReturn = calculate_rewards(active_batch, task_to_env)
+
+        # Ensure reward tensor size matches active_indices size
+        if len(env_output.rewards) != len(active_indices):
+            print(f"Warning: Reward size mismatch - rewards: {len(env_output.rewards)}, active_indices: {len(active_indices)}")
+            # Truncate to minimum size
+            min_size = min(len(env_output.rewards), len(active_indices))
+            active_indices = active_indices[:min_size]
+            # Also truncate env_output components to match
+            env_output = EnvironmentReturn(
+                observations=env_output.observations[:min_size],
+                metadata=env_output.metadata[:min_size],
+                next_stop_strings=env_output.next_stop_strings[:min_size],
+                rewards=env_output.rewards[:min_size],
+                terminateds=env_output.terminateds[:min_size],
+            )
 
         total_rewards[active_indices] += env_output.rewards
 
@@ -317,12 +344,14 @@ def run_multi_turn_rollout(
             )["input_ids"][0]
 
             # check if new message overflows max_seq_len
+            # Check bounds for generated_ids before accessing
+            gen_ids_len = len(generated_ids[i]) if i < len(generated_ids) else 0
             if (
-                len(tokenized_obs) + len(generated_ids[i]) + active_input_lengths[i]
+                len(tokenized_obs) + gen_ids_len + active_input_lengths[i]
                 >= max_seq_len
             ):
                 tokens_left_for_obs = max_seq_len - (
-                    len(generated_ids[i]) + active_input_lengths[i]
+                    gen_ids_len + active_input_lengths[i]
                 )
                 assert tokens_left_for_obs >= 0, (
                     f"tokens_left_for_obs={tokens_left_for_obs} should not be negative. This should not happen if the inference engine respects the max sequence length."

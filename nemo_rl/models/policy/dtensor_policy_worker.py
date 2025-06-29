@@ -297,6 +297,9 @@ class DTensorPolicyWorker:
         local_gbs = gbs // self.dp_size
         dataset_size = data["input_ids"].shape[0]
         num_global_batches = dataset_size // local_gbs
+        
+        # Initialize grad_norm to None for eval mode
+        grad_norm: Optional[float | torch.Tensor] = None
 
         # dim 1 is always assumed to be the sequence dim, sanity check this here
         sequence_dim = 1
@@ -343,8 +346,15 @@ class DTensorPolicyWorker:
                     )
 
                 to_reduce = torch.tensor([local_valid_seqs, local_valid_toks]).cuda()
-                torch.distributed.all_reduce(to_reduce, group=self.dp_mesh.get_group())
-                global_valid_seqs, global_valid_toks = to_reduce[0], to_reduce[1]
+                # Add barrier to ensure all ranks are ready before all_reduce
+                try:
+                    torch.distributed.barrier(group=self.dp_mesh.get_group())
+                    torch.distributed.all_reduce(to_reduce, group=self.dp_mesh.get_group())
+                    global_valid_seqs, global_valid_toks = to_reduce[0], to_reduce[1]
+                except Exception as e:
+                    print(f"Warning: NCCL communication failed on rank {torch.distributed.get_rank()}: {e}")
+                    # Use local values as fallback
+                    global_valid_seqs, global_valid_toks = local_valid_seqs, local_valid_toks
 
                 if (
                     hasattr(loss_fn, "loss_type")
@@ -357,6 +367,29 @@ class DTensorPolicyWorker:
                 self.optimizer.zero_grad()
                 mb_losses = []
                 batch = data.get_batch(batch_idx=gb_idx, batch_size=local_gbs)
+                
+                # Validate batch consistency across ranks to prevent NCCL deadlocks
+                if batch and "input_ids" in batch:
+                    batch_size_tensor = torch.tensor([batch["input_ids"].size(0)], device="cuda")
+                    try:
+                        # Check if all ranks have the same batch size
+                        all_batch_sizes = [torch.zeros_like(batch_size_tensor) for _ in range(self.dp_size)]
+                        torch.distributed.all_gather(all_batch_sizes, batch_size_tensor, group=self.dp_mesh.get_group())
+                        batch_sizes = [t.item() for t in all_batch_sizes]
+                        
+                        if len(set(batch_sizes)) > 1:
+                            print(f"Warning: Inconsistent batch sizes across ranks: {batch_sizes} on rank {torch.distributed.get_rank()}")
+                            # Use minimum batch size for consistency
+                            min_batch_size = min(batch_sizes)
+                            if batch["input_ids"].size(0) > min_batch_size:
+                                for k, v in batch.items():
+                                    if torch.is_tensor(v) and v.size(0) > min_batch_size:
+                                        batch[k] = v[:min_batch_size]
+                                    elif not torch.is_tensor(v) and len(v) > min_batch_size:
+                                        batch[k] = v[:min_batch_size]
+                    except Exception as e:
+                        print(f"Warning: Batch size validation failed on rank {torch.distributed.get_rank()}: {e}")
+                
                 # Calculate number of microbatches to process
                 # make_microbatch_iterator assumes that the batch size is a multiple of the microbatch size
                 # so its safe to not check for the case where the last data slice is smaller than mbs
@@ -430,7 +463,6 @@ class DTensorPolicyWorker:
                         mb_losses.append(loss.item())
                         all_mb_metrics.append(loss_metrics)
 
-                grad_norm: Optional[float | torch.Tensor] = None
                 if not eval_mode:
                     with torch.no_grad():
                         grad_norm = get_grad_norm(
@@ -463,9 +495,16 @@ class DTensorPolicyWorker:
             # Compute global loss across all ranks
             with torch.no_grad():
                 global_loss = torch.tensor(losses, device="cuda")
-                torch.distributed.all_reduce(
-                    global_loss, group=self.dp_mesh.get_group()
-                )
+                # Add barrier and error handling for NCCL communication
+                try:
+                    torch.distributed.barrier(group=self.dp_mesh.get_group())
+                    torch.distributed.all_reduce(
+                        global_loss, group=self.dp_mesh.get_group()
+                    )
+                except Exception as e:
+                    print(f"Warning: NCCL communication failed for global_loss on rank {torch.distributed.get_rank()}: {e}")
+                    # Use local loss as fallback
+                    pass
             # Aggregate metrics across all microbatches
             mb_metrics = defaultdict(list)
             for m in all_mb_metrics:

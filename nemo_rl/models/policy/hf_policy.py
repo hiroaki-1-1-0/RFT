@@ -139,12 +139,14 @@ class HfPolicy(ColocatablePolicyInterface, GenerationInterface):
             sharded_data, unsorted_data_indices = data.shard_by_batch_size(  # type: ignore
                 dp_size,
                 batch_size=None,
+                allow_uneven_shards=True,
                 dynamic_batching_args=self.dynamic_batching_args,
             )
         else:
             sharded_data = data.shard_by_batch_size(  # type: ignore
                 dp_size,
                 batch_size=None,
+                allow_uneven_shards=True,
             )
 
         futures = self.worker_group.run_all_workers_sharded_data(
@@ -184,12 +186,14 @@ class HfPolicy(ColocatablePolicyInterface, GenerationInterface):
             sharded_data, unsorted_data_indices = data.shard_by_batch_size(  # type: ignore
                 dp_size,
                 batch_size=None,
+                allow_uneven_shards=True,
                 dynamic_batching_args=self.dynamic_batching_args,
             )
         else:
             sharded_data = data.shard_by_batch_size(  # type: ignore
                 dp_size,
                 batch_size=None,
+                allow_uneven_shards=True,
             )
 
         futures = self.worker_group.run_all_workers_sharded_data(
@@ -233,12 +237,14 @@ class HfPolicy(ColocatablePolicyInterface, GenerationInterface):
             sharded_data, _ = data.shard_by_batch_size(
                 dp_size,
                 batch_size=batch_size,
+                allow_uneven_shards=True,
                 dynamic_batching_args=self.dynamic_batching_args,
             )
         else:
             sharded_data = data.shard_by_batch_size(
                 dp_size,
                 batch_size=batch_size,
+                allow_uneven_shards=True,
             )
 
         # Train each shard in parallel
@@ -285,7 +291,7 @@ class HfPolicy(ColocatablePolicyInterface, GenerationInterface):
         )
 
         dp_size = self.sharding_annotations.get_axis_size("data_parallel")
-        sharded_data = data.shard_by_batch_size(dp_size, batch_size=None)
+        sharded_data = data.shard_by_batch_size(dp_size, batch_size=None, allow_uneven_shards=True)
         futures = self.worker_group.run_all_workers_sharded_data(
             "generate",
             sharded_data,

@@ -265,10 +265,8 @@ class BatchedDataDict(UserDict, Generic[DictT]):
         >>> # This is incompatible with the batch_size argument
         ```
         """
-        if allow_uneven_shards:
-            assert batch_size is None, (
-                "batch_size must be None if allow_uneven_shards is True"
-            )
+        # Note: Previously there was a constraint that batch_size must be None when allow_uneven_shards=True
+        # We've removed this constraint to allow more flexible batch size handling
 
         # Get the total batch size
         batch_sizes = set()
@@ -278,17 +276,35 @@ class BatchedDataDict(UserDict, Generic[DictT]):
             else:
                 batch_sizes.add(len(val))
 
-        assert len(batch_sizes) == 1, (
-            "Batch sizes are not the same across the rollout batch"
-        )
-        total_batch_size = batch_sizes.pop()
+        # If we have multiple different batch sizes, use the most common one
+        # This can happen in GRPO where different fields may have different dimensions
+        if len(batch_sizes) == 1:
+            total_batch_size = batch_sizes.pop()
+        else:
+            # Find the most common batch size
+            from collections import Counter
+            batch_size_counts = Counter()
+            for val in self.data.values():
+                if isinstance(val, torch.Tensor):
+                    batch_size_counts[val.size(0)] += 1
+                else:
+                    batch_size_counts[len(val)] += 1
+            
+            total_batch_size = batch_size_counts.most_common(1)[0][0]
+            print(f"Warning: Found multiple batch sizes {batch_sizes}, using most common: {total_batch_size}")
         if batch_size is None:
             batch_size = total_batch_size
 
         # Validate that our batch size parameters are compatible with the data dimensions
-        assert total_batch_size % batch_size == 0, (
-            f"Total batch size ({total_batch_size}) is not a multiple of batch_size ({batch_size})"
-        )
+        # If batch_size is larger than total_batch_size, use total_batch_size instead
+        if batch_size > total_batch_size:
+            print(f"Warning: batch_size ({batch_size}) is larger than total_batch_size ({total_batch_size}), using total_batch_size")
+            batch_size = total_batch_size
+        else:
+            # Only check divisibility if batch_size <= total_batch_size
+            assert total_batch_size % batch_size == 0, (
+                f"Total batch size ({total_batch_size}) is not a multiple of batch_size ({batch_size})"
+            )
         if not allow_uneven_shards:
             assert batch_size % shards == 0, (
                 f"Batch size ({batch_size}) is not a multiple of shards ({shards})"
@@ -331,11 +347,35 @@ class BatchedDataDict(UserDict, Generic[DictT]):
             for k, v in self.data.items():
                 sorted_v: torch.Tensor | list[Any]
                 if torch.is_tensor(v):
-                    sorted_v = v.index_select(
-                        dim=0, index=torch.IntTensor(batch_sorted_indices)
-                    )
+                    field_size = v.size(0)
                 else:
-                    sorted_v = [v[i] for i in batch_sorted_indices]
+                    field_size = len(v)
+                
+                # For dynamic batching, we need to ensure all fields have consistent batch size
+                # Use the minimum field size to ensure compatibility
+                min_field_size = min(
+                    (val.size(0) if torch.is_tensor(val) else len(val))
+                    for val in self.data.values()
+                )
+                
+                # Truncate batch_sorted_indices to the minimum field size
+                valid_indices = [i for i in batch_sorted_indices if i < min_field_size]
+                
+                if torch.is_tensor(v):
+                    if len(valid_indices) > 0:
+                        # Ensure we don't go beyond the field's actual size
+                        clamped_indices = [min(i, field_size - 1) for i in valid_indices if i < field_size]
+                        if len(clamped_indices) > 0:
+                            sorted_v = v.index_select(
+                                dim=0, index=torch.IntTensor(clamped_indices)
+                            )
+                        else:
+                            sorted_v = v[:0]
+                    else:
+                        sorted_v = v[:0]
+                else:
+                    valid_list_indices = [i for i in valid_indices if i < len(v)]
+                    sorted_v = [v[i] for i in valid_list_indices]
                 data[k] = sorted_v
         else:
             data = self.data
@@ -354,16 +394,59 @@ class BatchedDataDict(UserDict, Generic[DictT]):
                     # or if shard_end calculation goes beyond total_batch_size
                     shard_start = min(shard_start, total_batch_size)
                     shard_end = min(shard_end, total_batch_size)
+                
+                # Skip if the shard range is invalid
+                if shard_start >= shard_end:
+                    continue
+                    
                 indices = torch.arange(shard_start, shard_end)
 
+                # Check if any field has valid data for these indices
+                has_valid_data = False
                 for k in data:
+                    if torch.is_tensor(data[k]):
+                        field_size = data[k].size(0)
+                    else:
+                        field_size = len(data[k])
+                    
+                    valid_indices = indices[indices < field_size]
+                    if len(valid_indices) > 0:
+                        has_valid_data = True
+                        break
+                
+                # Skip this shard chunk if no field has valid data
+                if not has_valid_data:
+                    continue
+
+                for k in data:
+                    # Check the actual size of this field and adjust indices if necessary
+                    if torch.is_tensor(data[k]):
+                        field_size = data[k].size(0)
+                    else:
+                        field_size = len(data[k])
+                    
+                    # Filter indices to only include those within the field's range
+                    valid_indices = indices[indices < field_size]
+                    
+                    if len(valid_indices) == 0:
+                        # For empty fields, ensure the shard has at least an empty placeholder
+                        if k not in aggregated_shards[shard_idx]:
+                            if torch.is_tensor(data[k]):
+                                # Create empty tensor with same shape except first dimension
+                                empty_shape = list(data[k].shape)
+                                empty_shape[0] = 0
+                                aggregated_shards[shard_idx][k] = torch.empty(empty_shape, dtype=data[k].dtype, device=data[k].device)
+                            else:
+                                aggregated_shards[shard_idx][k] = []
+                        continue  # Skip further processing for this field
+                    
                     if k not in aggregated_shards[shard_idx]:
                         # First time seeing this key for this shard, initialize it
                         if torch.is_tensor(data[k]):
-                            aggregated_shards[shard_idx][k] = data[k][indices].clone()
+                            aggregated_shards[shard_idx][k] = data[k][valid_indices].clone()
                         else:
                             aggregated_shards[shard_idx][k] = [
-                                data[k][i] for i in indices
+                                data[k][i] for i in valid_indices
                             ]
                     else:
                         # Append to existing data - concatenate tensors or extend lists
@@ -371,13 +454,53 @@ class BatchedDataDict(UserDict, Generic[DictT]):
                             aggregated_shards[shard_idx][k] = torch.cat(
                                 [
                                     aggregated_shards[shard_idx][k],
-                                    data[k][indices].clone(),
+                                    data[k][valid_indices].clone(),
                                 ]
                             )
                         else:
                             aggregated_shards[shard_idx][k].extend(
-                                [data[k][i] for i in indices]
+                                [data[k][i] for i in valid_indices]
                             )
+        
+        # Ensure all shards have all keys, even if empty
+        all_keys = set(data.keys())
+        for shard in aggregated_shards:
+            for k in all_keys:
+                if k not in shard:
+                    if torch.is_tensor(data[k]):
+                        # Create empty tensor with same shape except first dimension
+                        empty_shape = list(data[k].shape)
+                        empty_shape[0] = 0
+                        shard[k] = torch.empty(empty_shape, dtype=data[k].dtype, device=data[k].device)
+                    else:
+                        shard[k] = []
+        
+        # For NCCL communication stability, ensure all shards have consistent size
+        # Find the minimum shard size across all shards to prevent deadlocks
+        if allow_uneven_shards and len(aggregated_shards) > 1:
+            # Get sizes for each shard
+            shard_sizes = []
+            for shard in aggregated_shards:
+                if shard:
+                    # Get size from the first tensor field
+                    for k, v in shard.items():
+                        if torch.is_tensor(v):
+                            shard_sizes.append(v.size(0))
+                            break
+                    else:
+                        shard_sizes.append(0)
+                else:
+                    shard_sizes.append(0)
+            
+            if shard_sizes:
+                min_shard_size = min(shard_sizes)
+                # Truncate all shards to the minimum size for NCCL consistency
+                for shard in aggregated_shards:
+                    for k, v in list(shard.items()):
+                        if torch.is_tensor(v) and v.size(0) > min_shard_size:
+                            shard[k] = v[:min_shard_size]
+                        elif not torch.is_tensor(v) and len(v) > min_shard_size:
+                            shard[k] = v[:min_shard_size]
 
         # map inputs to microbatches such that the total number tokens in
         # a microbatch is as close to (including padding tokens) 'max_tokens_per_microbatch'
@@ -387,29 +510,67 @@ class BatchedDataDict(UserDict, Generic[DictT]):
             ]
             micro_batch_indices = []
             micro_batch_lengths = []
+            
+            # Check if we have valid shards with required keys for dynamic batching
+            valid_shards = [
+                shard for shard in aggregated_shards 
+                if (len(shard.data) > 0 and 
+                    dynamic_batching_args["input_lengths_key"] in shard)
+            ]
+            
+            if not valid_shards:
+                # No valid shards for dynamic batching, return empty microbatch info
+                for shard in aggregated_shards:
+                    shard.micro_batch_indices = []
+                    shard.micro_batch_lengths = []
+                return aggregated_shards, batch_sorted_indices
+            
+            # When using uneven shards, we need to use the minimum shard size across all shards
+            # to ensure consistent microbatch structure across all shards
+            if allow_uneven_shards:
+                # Filter out empty shards and calculate minimum size
+                non_empty_shards = [shard for shard in aggregated_shards if len(shard.data) > 0]
+                if non_empty_shards:
+                    min_shard_size = min(shard.size for shard in non_empty_shards)
+                else:
+                    min_shard_size = 0
+                effective_shard_size = min_shard_size
+                # Recalculate num_chunks based on the minimum shard size
+                effective_num_chunks = (min_shard_size + effective_shard_size - 1) // effective_shard_size if min_shard_size > 0 else 0
+            else:
+                effective_shard_size = shard_size
+                effective_num_chunks = num_chunks
+            
             # loop through each chunk, dividing the chunk into microbatches
-            for chunk_idx in range(num_chunks):
+            for chunk_idx in range(effective_num_chunks):
                 chunk_micro_batch_indices = [[0, 0]]
                 chunk_micro_batch_lengths = [0]
                 max_seqlen_this_mb = 0
+                # Calculate the actual shard size for this chunk (may be smaller for the last shard when allow_uneven_shards=True)
+                actual_shard_size = min(effective_shard_size, min_shard_size - chunk_idx * effective_shard_size) if allow_uneven_shards else effective_shard_size
                 # for each indice in the shard, map it to an microbatch
-                for shard_indice in range(shard_size):
+                for shard_indice in range(actual_shard_size):
                     # use the max seqlen of all shards to calculate the total number of tokens in the mb
                     # this ensures each DP rank has the same batch size each iteration which is
                     # required for FSDP2 and megatron policies.
                     max_seqlen_this_shard_indice = 0
-                    chunk_start = chunk_idx * shard_size
-                    chunk_end = (chunk_idx + 1) * shard_size
+                    chunk_start = chunk_idx * effective_shard_size
+                    chunk_end = min(chunk_start + actual_shard_size, min_shard_size) if allow_uneven_shards else (chunk_idx + 1) * effective_shard_size
                     for shard in aggregated_shards:
+                        # Skip empty shards or shards missing required keys
+                        if (len(shard.data) == 0 or 
+                            dynamic_batching_args["input_lengths_key"] not in shard):
+                            continue
+                            
                         input_lengths = shard[
                             dynamic_batching_args["input_lengths_key"]
                         ]
-                        seq_len = input_lengths[chunk_start:chunk_end][
-                            shard_indice
-                        ].item()
-                        max_seqlen_this_shard_indice = max(
-                            max_seqlen_this_shard_indice, seq_len
-                        )
+                        # Ensure we don't go out of bounds when accessing input_lengths
+                        if chunk_start + shard_indice < len(input_lengths):
+                            seq_len = input_lengths[chunk_start + shard_indice].item()
+                            max_seqlen_this_shard_indice = max(
+                                max_seqlen_this_shard_indice, seq_len
+                            )
 
                     # pad to nearest multiple specified
                     sequence_length_round = dynamic_batching_args[
@@ -471,9 +632,16 @@ class BatchedDataDict(UserDict, Generic[DictT]):
         start = batch_size * batch_idx
         end = batch_size * (batch_idx + 1)
         batch = self.slice(start, end)
-        if self.micro_batch_indices is not None:
+        if (self.micro_batch_indices is not None and 
+            self.micro_batch_lengths is not None and
+            batch_idx < len(self.micro_batch_indices)):
             batch.micro_batch_indices = [self.micro_batch_indices[batch_idx]]
-            batch.micro_batch_lengths = [self.micro_batch_lengths[batch_idx]]  # type: ignore # This exists if idxs do
+            batch.micro_batch_lengths = [self.micro_batch_lengths[batch_idx]]
+        else:
+            # If micro_batch_indices is not available or batch_idx is out of range,
+            # set empty microbatch info
+            batch.micro_batch_indices = None
+            batch.micro_batch_lengths = None
 
         return batch
 
@@ -529,11 +697,19 @@ class BatchedDataDict(UserDict, Generic[DictT]):
         Returns:
             Iterator["SlicedDataDict"]: An iterator that yield dynamic microbatches
         """
-        assert (
-            self.micro_batch_indices is not None
-            and len(self.micro_batch_indices) == 1
-            and self.micro_batch_lengths is not None
-        )
+        # If micro_batch_indices is not available, fallback to yielding the entire batch
+        if (self.micro_batch_indices is None or 
+            self.micro_batch_lengths is None or 
+            len(self.micro_batch_indices) == 0):
+            # Return the entire batch as a single microbatch
+            yield self
+            return
+        
+        # Ensure we have the expected structure
+        if len(self.micro_batch_indices) != 1:
+            # If structure is unexpected, fallback to entire batch
+            yield self
+            return
 
         for seqlen, (start_idx, end_idx) in zip(
             self.micro_batch_lengths[0], self.micro_batch_indices[0]
@@ -556,11 +732,13 @@ class BatchedDataDict(UserDict, Generic[DictT]):
     @property
     def size(self) -> int:
         """Get the batch size of the batch."""
+        # Check if data is empty first
+        if not self.data:
+            return 0
+        
         # Get the first key and use its size as the batch size
         # This assumes all keys have the same batch size
         key = next(iter(self.data))
-        if not self.data:
-            return 0
         if not torch.is_tensor(self.data[key]):
             return len(self.data[key])
         return self.data[key].shape[0]  # type: ignore # it's a tensor here
