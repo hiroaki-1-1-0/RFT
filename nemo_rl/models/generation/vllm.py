@@ -1267,7 +1267,7 @@ class VllmGeneration(GenerationInterface):
 
         # Shard the data across the tied worker groups
         dp_size = self.sharding_annotations.get_axis_size("data_parallel")
-        sharded_data = data.shard_by_batch_size(dp_size, batch_size=batch_size)
+        sharded_data = data.shard_by_batch_size(dp_size, batch_size=batch_size, allow_uneven_shards=True)
         future_bundle = self.worker_group.run_all_workers_sharded_data(
             "generate_text",
             sharded_data,

@@ -571,10 +571,17 @@ def grpo_train(
         logger.log_batched_dict_as_jsonl(log_data, f"train_data_step{step}.jsonl")
 
         print("\n📊 Training Results:")
+        # Handle cases where grad_norm might be None (e.g., in eval mode)
+        grad_norm_value = train_results["grad_norm"]
+        if grad_norm_value is not None:
+            grad_norm_numpy = grad_norm_value.numpy() if hasattr(grad_norm_value, 'numpy') else grad_norm_value
+        else:
+            grad_norm_numpy = 0.0
+            
         metrics = {
             "loss": train_results["loss"].numpy(),
             "reward": rewards.numpy(),
-            "grad_norm": train_results["grad_norm"].numpy(),
+            "grad_norm": grad_norm_numpy,
         }
         metrics.update(train_results["all_mb_metrics"])
         for k, v in metrics.items():
